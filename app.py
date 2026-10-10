@@ -1,6 +1,4 @@
 import os
-import re
-import json
 import random
 import string
 from datetime import datetime
@@ -12,14 +10,11 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ─────────────────────────────────────────────
-# APP CONFIG
-# ─────────────────────────────────────────────
+# ─── CONFIG ─────────────────────────────────────
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET', 'dev-secret-change-me')
 
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///scripthub.db')
-# Render gives postgres:// — SQLAlchemy needs postgresql://
 if DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
@@ -31,15 +26,13 @@ ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
 db = SQLAlchemy(app)
 socketio = SocketIO(app, cors_allowed_origins='*', async_mode='eventlet')
 
-# ─────────────────────────────────────────────
-# MODELS
-# ─────────────────────────────────────────────
+# ─── MODELS ─────────────────────────────────────
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(20), default='user')  # user | admin
+    role = db.Column(db.String(20), default='user')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -51,8 +44,8 @@ class Script(db.Model):
     version = db.Column(db.String(20), default='1.0')
     real_content = db.Column(db.Text, default='')
     owner = db.Column(db.String(80), nullable=False)
-    access_type = db.Column(db.String(20), default='public')  # public | whitelist
-    allowed_ids = db.Column(db.Text, default='')  # comma-separated
+    access_type = db.Column(db.String(20), default='public')
+    allowed_ids = db.Column(db.Text, default='')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def ids_list(self):
@@ -95,7 +88,7 @@ class Channel(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     server_id = db.Column(db.Integer, db.ForeignKey('servers.id'))
     name = db.Column(db.String(80), nullable=False)
-    type = db.Column(db.String(20), default='text')  # text | voice
+    type = db.Column(db.String(20), default='text')
     created_by = db.Column(db.String(80))
 
 
@@ -109,9 +102,7 @@ class ChatMessage(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
-# ─────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────
+# ─── HELPERS ─────────────────────────────────────
 def gen_short_id(n=10):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
@@ -144,10 +135,10 @@ def current_user():
 
 def build_injected_code(script):
     """
-    Auto-inject ID check sa TAAS ng script.
-    Public → walang check
-    Whitelist (may IDs) → may check
-    Whitelist (walang IDs) → walang check
+    Auto-inject ID check at TOP of the script.
+    Public → no check.
+    Whitelist + IDs → has check + auto-kick.
+    Whitelist + no IDs → no check.
     """
     if script.access_type != 'whitelist':
         return script.real_content or ''
@@ -176,9 +167,7 @@ end
     return injected + (script.real_content or '')
 
 
-# ─────────────────────────────────────────────
-# AUTH ROUTES
-# ─────────────────────────────────────────────
+# ─── AUTH ───────────────────────────────────────
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -187,7 +176,6 @@ def login():
         admin_pw = request.form.get('admin_password', '')
         user = User.query.filter_by(username=u).first()
 
-        # Admin quick login
         if admin_pw and admin_pw == ADMIN_PASSWORD:
             session['user'] = u or 'admin'
             session['role'] = 'admin'
@@ -227,9 +215,7 @@ def logout():
     return redirect(url_for('login'))
 
 
-# ─────────────────────────────────────────────
-# DASHBOARD
-# ─────────────────────────────────────────────
+# ─── DASHBOARD ──────────────────────────────────
 @app.route('/')
 @login_required
 def dashboard():
@@ -246,9 +232,7 @@ def dashboard():
     return render_template('dashboard.html', scripts=scripts, stats=stats)
 
 
-# ─────────────────────────────────────────────
-# SCRIPT CRUD
-# ─────────────────────────────────────────────
+# ─── SCRIPT CRUD ────────────────────────────────
 @app.route('/create', methods=['GET', 'POST'])
 @login_required
 def create():
@@ -260,13 +244,9 @@ def create():
         allowed_ids = request.form.get('allowed_ids', '').strip()
 
         s = Script(
-            name=name,
-            short_id=gen_short_id(),
-            version=version,
-            real_content=real_content,
-            owner=current_user(),
-            access_type=access_type,
-            allowed_ids=allowed_ids,
+            name=name, short_id=gen_short_id(), version=version,
+            real_content=real_content, owner=current_user(),
+            access_type=access_type, allowed_ids=allowed_ids,
         )
         db.session.add(s)
         db.session.commit()
@@ -293,10 +273,10 @@ def edit(sid):
     return render_template('edit.html', script=script)
 
 
+# ─── ⭐ AUTO-INJECT ID (click → adds ID to script) ───
 @app.route('/add_id/<int:sid>', methods=['POST'])
 @login_required
 def add_id(sid):
-    """Auto-add ID — click ID → automatically injected sa script."""
     script = Script.query.get_or_404(sid)
     if session.get('role') != 'admin' and script.owner != current_user():
         return jsonify({'ok': False, 'error': 'forbidden'}), 403
@@ -352,17 +332,15 @@ def logs(sid):
     script = Script.query.get_or_404(sid)
     if session.get('role') != 'admin' and script.owner != current_user():
         abort(403)
-    entries = ExecutionLog.query.filter_by(script_id=sid).order_by(
-        ExecutionLog.created_at.desc()).limit(200).all()
+    entries = ExecutionLog.query.filter_by(script_id=sid)\
+        .order_by(ExecutionLog.created_at.desc()).limit(200).all()
     allowed = sum(1 for e in entries if e.allowed)
     kicked = sum(1 for e in entries if e.kicked)
     return render_template('logs.html', script=script, entries=entries,
                            allowed=allowed, kicked=kicked)
 
 
-# ─────────────────────────────────────────────
-# RAW API (loadstring target)
-# ─────────────────────────────────────────────
+# ─── RAW API ────────────────────────────────────
 @app.route('/api/raw')
 def api_raw():
     short_id = request.args.get('id', '')
@@ -370,26 +348,18 @@ def api_raw():
     if not script:
         return Response('-- Script not found', mimetype='text/plain')
 
-    # Log attempt (best-effort)
     try:
-        log = ExecutionLog(
-            script_id=script.id,
-            username=current_user() or 'anonymous',
-            allowed=True,
-            kicked=False,
-        )
+        log = ExecutionLog(script_id=script.id, username=current_user() or 'anonymous',
+                           allowed=True, kicked=False)
         db.session.add(log)
         db.session.commit()
     except Exception:
         db.session.rollback()
 
-    code = build_injected_code(script)
-    return Response(code, mimetype='text/plain')
+    return Response(build_injected_code(script), mimetype='text/plain')
 
 
-# ─────────────────────────────────────────────
-# ADMIN
-# ─────────────────────────────────────────────
+# ─── ADMIN ──────────────────────────────────────
 @app.route('/admin')
 @login_required
 @admin_required
@@ -411,18 +381,15 @@ def delete_user(uid):
     return redirect(url_for('admin'))
 
 
-# ─────────────────────────────────────────────
-# SERVERS
-# ─────────────────────────────────────────────
+# ─── SERVERS ────────────────────────────────────
 @app.route('/servers')
 @login_required
 def servers():
     user = current_user()
-    my_servers = Server.query.join(ServerMember, Server.id == ServerMember.server_id)\
+    rows = Server.query.join(ServerMember, Server.id == ServerMember.server_id)\
         .filter(ServerMember.username == user).all()
-    # dedupe
     seen, uniq = set(), []
-    for s in my_servers:
+    for s in rows:
         if s.id not in seen:
             seen.add(s.id)
             uniq.append(s)
@@ -437,7 +404,6 @@ def server_view(sid):
     member = ServerMember.query.filter_by(server_id=sid, username=user).first()
     if not member and server.owner != user:
         abort(403)
-
     channels = Channel.query.filter_by(server_id=sid).all()
     members = ServerMember.query.filter_by(server_id=sid).all()
     return render_template('server_view.html', server=server,
@@ -451,15 +417,12 @@ def api_create_server():
     icon = request.form.get('icon', '🎮')
     if not name:
         return jsonify({'ok': False, 'error': 'Name required'}), 400
-
     s = Server(name=name, owner=current_user(), icon=icon, invite_code=gen_invite())
     db.session.add(s)
     db.session.flush()
     db.session.add(ServerMember(server_id=s.id, username=current_user(), role='owner'))
-    db.session.add(Channel(server_id=s.id, name='general', type='text',
-                           created_by=current_user()))
-    db.session.add(Channel(server_id=s.id, name='General Voice', type='voice',
-                           created_by=current_user()))
+    db.session.add(Channel(server_id=s.id, name='general', type='text', created_by=current_user()))
+    db.session.add(Channel(server_id=s.id, name='General Voice', type='voice', created_by=current_user()))
     db.session.commit()
     return jsonify({'ok': True, 'server_id': s.id})
 
@@ -471,9 +434,7 @@ def api_join_server():
     server = Server.query.filter_by(invite_code=code).first()
     if not server:
         return jsonify({'ok': False, 'error': 'Invalid code'}), 404
-    existing = ServerMember.query.filter_by(
-        server_id=server.id, username=current_user()).first()
-    if not existing:
+    if not ServerMember.query.filter_by(server_id=server.id, username=current_user()).first():
         db.session.add(ServerMember(server_id=server.id, username=current_user()))
         db.session.commit()
     return jsonify({'ok': True, 'server_id': server.id})
@@ -482,7 +443,6 @@ def api_join_server():
 @app.route('/api/servers/<int:sid>/channels', methods=['POST'])
 @login_required
 def api_create_channel(sid):
-    server = Server.query.get_or_404(sid)
     name = request.form.get('name', '').strip()
     ctype = request.form.get('type', 'text')
     if not name:
@@ -513,11 +473,8 @@ def api_messages(cid):
     msgs = ChatMessage.query.filter_by(channel_id=cid)\
         .order_by(ChatMessage.created_at.asc()).limit(200).all()
     return jsonify([{
-        'id': m.id,
-        'username': m.username,
-        'role': m.role,
-        'message': m.message,
-        'time': m.created_at.strftime('%H:%M'),
+        'id': m.id, 'username': m.username, 'role': m.role,
+        'message': m.message, 'time': m.created_at.strftime('%H:%M'),
     } for m in msgs])
 
 
@@ -534,10 +491,8 @@ def api_send(cid):
     return jsonify({'ok': True})
 
 
-# ─────────────────────────────────────────────
-# SOCKETIO — Voice Chat + WebRTC signaling
-# ─────────────────────────────────────────────
-voice_rooms = {}  # room -> {sid: {username, muted, streaming}}
+# ─── SOCKETIO (Voice + WebRTC) ──────────────────
+voice_rooms = {}
 
 
 @socketio.on('connect')
@@ -550,10 +505,7 @@ def on_join_voice(data):
     room = f"voice_{data['channel_id']}"
     join_room(room)
     voice_rooms.setdefault(room, {})[request.sid] = {
-        'username': session.get('user', 'anon'),
-        'muted': False,
-        'streaming': False,
-    }
+        'username': session.get('user', 'anon'), 'muted': False, 'streaming': False}
     emit('voice_participants', voice_rooms[room], to=room)
 
 
@@ -584,14 +536,12 @@ def on_toggle_stream(data):
 @socketio.on('webrtc_offer')
 def on_offer(data):
     room = f"voice_{data['channel_id']}"
-    emit('webrtc_offer', {'from': request.sid, 'sdp': data['sdp']},
-         to=room, include_self=False)
+    emit('webrtc_offer', {'from': request.sid, 'sdp': data['sdp']}, to=room, include_self=False)
 
 
 @socketio.on('webrtc_answer')
 def on_answer(data):
-    emit('webrtc_answer', {'from': request.sid, 'sdp': data['sdp']},
-         to=data['to'])
+    emit('webrtc_answer', {'from': request.sid, 'sdp': data['sdp']}, to=data['to'])
 
 
 @socketio.on('webrtc_ice')
@@ -609,17 +559,13 @@ def on_disconnect():
             emit('voice_participants', members, to=room)
 
 
-# ─────────────────────────────────────────────
-# INIT DB + RUN
-# ─────────────────────────────────────────────
+# ─── INIT ───────────────────────────────────────
 with app.app_context():
     db.create_all()
-    # Seed admin if none
     if not User.query.filter_by(role='admin').first():
-        db.session.add(User(
-            username='admin',
-            password=generate_password_hash(ADMIN_PASSWORD),
-            role='admin'))
+        db.session.add(User(username='admin',
+                            password=generate_password_hash(ADMIN_PASSWORD),
+                            role='admin'))
         db.session.commit()
 
 
