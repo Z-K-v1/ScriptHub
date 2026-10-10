@@ -1,0 +1,2 @@
+# ScriptHub
+Free unlimited
